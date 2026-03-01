@@ -31,7 +31,7 @@ function generateWebGLFingerprint() {
 async function generateCanvasFingerprint() {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  const hashBuffer = await crypto.subtle.digest('MD5', bytes);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', bytes);
   const hashArray = new Uint8Array(hashBuffer);
   return btoa(String.fromCharCode(...hashArray)).substring(0, 32);
 }
