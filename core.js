@@ -1014,7 +1014,7 @@ async function downloadVideoWithYtDlp(videoUrl, sendLog) {
 
     const outputFile = path.join(tmpDir, `video_${Date.now()}.mp4`);
     
-    sendLog('video.download.running', { videoUrl, outputFile });
+    sendLog('video.download.running', { videoUrl });
 
     const ytdlp = spawn('yt-dlp', [
       '-f', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best',
@@ -1039,6 +1039,12 @@ async function downloadVideoWithYtDlp(videoUrl, sendLog) {
 
     ytdlp.on('close', (code) => {
       if (code !== 0) {
+        // 失败时清理临时文件
+        try {
+          if (fs.existsSync(outputFile)) {
+            fs.unlinkSync(outputFile);
+          }
+        } catch {}
         reject(new Error(`yt-dlp exited with code ${code}: ${stderr}`));
         return;
       }
@@ -1048,31 +1054,37 @@ async function downloadVideoWithYtDlp(videoUrl, sendLog) {
         return;
       }
 
-      const stats = fs.statSync(outputFile);
-      const bytes = fs.readFileSync(outputFile);
-      
-      sendLog('video.download.finished', { size: stats.size, filename: path.basename(outputFile) });
-
-      // 创建附件对象，格式与网页上传的一致
-      const base64 = bytes.toString('base64');
-      const dataUrl = `data:video/mp4;base64,${base64}`;
-      
-      const attachment = {
-        source: dataUrl,
-        filename: path.basename(outputFile),
-        mimeType: 'video/mp4',
-        explicitType: 'video'
-      };
-
-      // 清理临时文件
       try {
-        fs.unlinkSync(outputFile);
-      } catch {}
+        const stats = fs.statSync(outputFile);
+        const bytes = fs.readFileSync(outputFile);
+        
+        sendLog('video.download.finished', { size: stats.size, filename: path.basename(outputFile) });
 
-      resolve(attachment);
+        // 创建附件对象，格式与网页上传的一致
+        const base64 = bytes.toString('base64');
+        const dataUrl = `data:video/mp4;base64,${base64}`;
+        
+        const attachment = {
+          source: dataUrl,
+          filename: path.basename(outputFile),
+          mimeType: 'video/mp4',
+          explicitType: 'video',
+          _tempFilePath: outputFile, // 保留临时文件路径，后续删除
+        };
+
+        resolve(attachment);
+      } catch (err) {
+        reject(err);
+      }
     });
 
     ytdlp.on('error', (err) => {
+      // 错误时清理临时文件
+      try {
+        if (fs.existsSync(outputFile)) {
+          fs.unlinkSync(outputFile);
+        }
+      } catch {}
       if (err.code === 'ENOENT') {
         reject(new Error('yt-dlp not found. Please install yt-dlp first.'));
       } else {
@@ -1086,7 +1098,7 @@ async function downloadVideoWithYtDlp(videoUrl, sendLog) {
 // 带日志流式返回的 Chat Completions
 // ============================================
 
-function createLogStreamWriter(writer) {
+function createLogStreamWriter(writer, onDone = null) {
   // writer 是一个对象，包含 write/log/end 方法
   return async (response, model, responseId, created, logStream) => {
     const reader = response.body?.getReader ? response.body.getReader() : null;
@@ -1156,6 +1168,12 @@ function createLogStreamWriter(writer) {
         writer.write('data: [DONE]\n\n');
       }
       writer.end();
+      // 执行清理回调
+      if (onDone) {
+        try {
+          onDone();
+        } catch {}
+      }
     }
   };
 }
@@ -1217,6 +1235,9 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
   const content = parsedMessages.content;
   sendLog('message.parsed', { contentLength: content.length, attachmentCount: parsedMessages.attachments.length });
 
+  // 临时文件路径收集（用于后续清理）
+  const tempFilesToClean = [];
+
   // 处理视频链接下载
   const videoUrl = body.video_url;
   if (videoUrl) {
@@ -1225,6 +1246,10 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
       const videoAttachment = await downloadVideoWithYtDlp(videoUrl, sendLog);
       if (videoAttachment) {
         parsedMessages.attachments.push(videoAttachment);
+        // 记录临时文件路径
+        if (videoAttachment._tempFilePath) {
+          tempFilesToClean.push(videoAttachment._tempFilePath);
+        }
         sendLog('video.download.completed', { filename: videoAttachment.filename, size: videoAttachment.bytes?.length || 0 });
       }
     } catch (err) {
@@ -1292,9 +1317,22 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
   const responseId = `chatcmpl-${uuidv4()}`;
   const created = Math.floor(Date.now() / 1000);
 
+  // 清理临时视频文件的函数
+  const cleanupTempFiles = () => {
+    const fs = require('fs');
+    for (const tempFile of tempFilesToClean) {
+      try {
+        if (fs.existsSync(tempFile)) {
+          fs.unlinkSync(tempFile);
+          sendLog('video.tempfile.cleaned', { file: tempFile });
+        }
+      } catch {}
+    }
+  };
+
   // 如果有流写入器，使用流式处理
   if (streamWriter && stream) {
-    const logAwareWriter = createLogStreamWriter(streamWriter);
+    const logAwareWriter = createLogStreamWriter(streamWriter, cleanupTempFiles);
     return logAwareWriter(chatResp, actualModel, responseId, created);
   }
 
@@ -1320,6 +1358,9 @@ async function handleChatCompletionsWithLogs(body, authHeader, env, streamWriter
   }
 
   sendLog('chat.completed', { outputLength: chunks.join('').length });
+
+  // 清理临时视频文件
+  cleanupTempFiles();
 
   if (stream) {
     const streamBody = chunks.map((c, i) => `data: ${JSON.stringify({
