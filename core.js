@@ -19,6 +19,9 @@ function uuidv4() {
 
 const BAXIA_VERSION = '2.5.36';
 const CACHE_TTL = 4 * 60 * 1000;
+const QWEN_BASE_URL = 'https://chat.qwen.ai';
+const QWEN_WEB_REFERER = `${QWEN_BASE_URL}/`;
+const QWEN_GUEST_REFERER = `${QWEN_BASE_URL}/c/guest`;
 let tokenCache = null;
 let tokenCacheTime = 0;
 
@@ -432,7 +435,7 @@ async function getAttachmentBytes(attachment) {
 
 async function requestUploadToken(file, baxiaTokens) {
   const filetype = inferFileCategory(file.mimeType, file.explicitType);
-  const resp = await fetch('https://chat.qwen.ai/api/v2/files/getstsToken', {
+  const resp = await fetch(`${QWEN_BASE_URL}/api/v2/files/getstsToken`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json, text/plain, */*',
@@ -442,7 +445,7 @@ async function requestUploadToken(file, baxiaTokens) {
       'bx-v': baxiaTokens.bxV,
       'source': 'web',
       'timezone': new Date().toUTCString(),
-      'Referer': 'https://chat.qwen.ai/',
+      'Referer': QWEN_WEB_REFERER,
       'x-request-id': uuidv4(),
     },
     body: JSON.stringify({
@@ -571,7 +574,7 @@ async function buildOssSignedHeaders(uploadUrl, tokenData, file) {
     'x-oss-date': xOssDate,
     'x-oss-security-token': tokenData.security_token,
     'x-oss-user-agent': xOssUserAgent,
-    'Referer': 'https://chat.qwen.ai/',
+    'Referer': QWEN_WEB_REFERER,
   };
 }
 
@@ -596,7 +599,7 @@ async function parseDocumentIfNeeded(qwenFilePayload, filetype, file, baxiaToken
   const mime = (file.mimeType || '').toLowerCase();
   const isTextLike = mime.startsWith('text/') || mime === 'application/json' || mime === 'application/xml' || mime === 'text/markdown';
   if (filetype !== 'document' || !isTextLike) return;
-  const resp = await fetch('https://chat.qwen.ai/api/v2/files/parse', {
+  const resp = await fetch(`${QWEN_BASE_URL}/api/v2/files/parse`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json, text/plain, */*',
@@ -606,7 +609,7 @@ async function parseDocumentIfNeeded(qwenFilePayload, filetype, file, baxiaToken
       'bx-v': baxiaTokens.bxV,
       'source': 'web',
       'timezone': new Date().toUTCString(),
-      'Referer': 'https://chat.qwen.ai/',
+      'Referer': QWEN_WEB_REFERER,
       'x-request-id': uuidv4(),
     },
     body: JSON.stringify({ file_id: qwenFilePayload.id }),
@@ -698,7 +701,7 @@ async function handleModels(authHeader, env) {
     return createResponse({ error: { message: 'Incorrect API key provided.', type: 'invalid_request_error' } }, 401);
   }
   try {
-    const resp = await fetch('https://chat.qwen.ai/api/models', {
+    const resp = await fetch(`${QWEN_BASE_URL}/api/models`, {
       headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
     });
     return createResponse(await resp.json());
@@ -740,12 +743,12 @@ async function handleChatCompletions(body, authHeader, env, streamWriter) {
   logChatDetail('core', 'request.config', { actualModel, chatType, enableSearch });
 
   // 创建会话
-  const createResp = await fetch('https://chat.qwen.ai/api/v2/chats/new', {
+  const createResp = await fetch(`${QWEN_BASE_URL}/api/v2/chats/new`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json', 'Content-Type': 'application/json',
       'bx-ua': bxUa, 'bx-umidtoken': bxUmidToken, 'bx-v': bxV,
-      'Referer': 'https://chat.qwen.ai/c/guest', 'source': 'web',
+      'Referer': QWEN_GUEST_REFERER, 'source': 'web',
       'x-request-id': uuidv4()
     },
     body: JSON.stringify({
@@ -779,12 +782,12 @@ async function handleChatCompletions(body, authHeader, env, streamWriter) {
   });
 
   // 发送请求
-  const chatResp = await fetch(`https://chat.qwen.ai/api/v2/chat/completions?chat_id=${chatId}`, {
+  const chatResp = await fetch(`${QWEN_BASE_URL}/api/v2/chat/completions?chat_id=${chatId}`, {
     method: 'POST',
     headers: {
       'Accept': 'application/json', 'Content-Type': 'application/json',
       'bx-ua': bxUa, 'bx-umidtoken': bxUmidToken, 'bx-v': bxV,
-      'source': 'web', 'version': '0.2.9', 'Referer': 'https://chat.qwen.ai/c/guest', 'x-request-id': uuidv4()
+      'source': 'web', 'version': '0.2.9', 'Referer': QWEN_GUEST_REFERER, 'x-request-id': uuidv4()
     },
     body: JSON.stringify({
       stream: true, version: '2.1', incremental_output: true,

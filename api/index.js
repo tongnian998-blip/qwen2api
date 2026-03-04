@@ -339,7 +339,10 @@ async function buildOssSignedHeaders(uploadUrlWithQuery, tokenData, file) {
   const region = credentialParts[2] || 'ap-southeast-1';
   const xOssDate = query.get('x-oss-date') || formatOssDate();
 
-  const canonicalUri = parsedUrl.pathname || '/';
+  const hostParts = parsedUrl.hostname.split('.');
+  const bucket = hostParts.length > 0 ? hostParts[0] : '';
+  const objectPath = parsedUrl.pathname || '/';
+  const canonicalUri = bucket ? `/${bucket}${objectPath}` : objectPath;
   const canonicalHeaders = [
     `host:${parsedUrl.host}`,
     'x-oss-content-sha256:UNSIGNED-PAYLOAD',
