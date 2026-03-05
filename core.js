@@ -1004,6 +1004,151 @@ function handleChatPage() {
 // 视频下载 (yt-dlp)
 // ============================================
 
+let ytdlpEnsurePromise = null;
+
+function isTruthyFlag(value, defaultValue = false) {
+  if (value === undefined || value === null || value === '') return defaultValue;
+  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
+}
+
+function fetchWithTimeout(url, options = {}, timeoutMs = 30000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(url, {
+    ...options,
+    signal: controller.signal,
+  }).finally(() => {
+    clearTimeout(timer);
+  });
+}
+
+function resolveYtDlpAsset(platform, arch) {
+  if (platform === 'win32') {
+    if (arch === 'arm64') return { assetName: 'yt-dlp_arm64.exe', binaryName: 'yt-dlp.exe' };
+    if (arch === 'ia32') return { assetName: 'yt-dlp_x86.exe', binaryName: 'yt-dlp.exe' };
+    return { assetName: 'yt-dlp.exe', binaryName: 'yt-dlp.exe' };
+  }
+  if (platform === 'darwin') {
+    return { assetName: 'yt-dlp_macos', binaryName: 'yt-dlp' };
+  }
+  if (platform === 'linux') {
+    if (arch === 'arm64') return { assetName: 'yt-dlp_linux_aarch64', binaryName: 'yt-dlp' };
+    return { assetName: 'yt-dlp_linux', binaryName: 'yt-dlp' };
+  }
+  throw new Error(`Unsupported platform for auto-install yt-dlp: ${platform}/${arch}`);
+}
+
+function canRunYtDlp(binaryPath) {
+  const { spawnSync } = require('child_process');
+  const result = spawnSync(binaryPath, ['--version'], {
+    stdio: 'ignore',
+    shell: false,
+  });
+  return result.status === 0;
+}
+
+async function ensureYtDlpAvailable(sendLog) {
+  const fs = require('fs');
+  const path = require('path');
+  const os = require('os');
+  const log = typeof sendLog === 'function' ? sendLog : () => {};
+  const platform = process.platform;
+  const arch = process.arch;
+  const configuredPath = (process.env.YT_DLP_PATH || '').trim();
+  if (configuredPath) {
+    if (!canRunYtDlp(configuredPath)) {
+      throw new Error(`YT_DLP_PATH is set but not executable: ${configuredPath}`);
+    }
+    return configuredPath;
+  }
+
+  if (canRunYtDlp('yt-dlp')) {
+    return 'yt-dlp';
+  }
+
+  const autoDownload = isTruthyFlag(process.env.YT_DLP_AUTO_DOWNLOAD, true);
+  if (!autoDownload) {
+    throw new Error('yt-dlp not found and auto-download is disabled (YT_DLP_AUTO_DOWNLOAD=false).');
+  }
+
+  if (ytdlpEnsurePromise) {
+    return ytdlpEnsurePromise;
+  }
+
+  ytdlpEnsurePromise = (async () => {
+    const { assetName, binaryName } = resolveYtDlpAsset(platform, arch);
+    const baseDir = path.join(os.tmpdir(), 'qwen2api_bin', 'yt-dlp');
+    const binaryPath = path.join(baseDir, binaryName);
+    const tempPath = `${binaryPath}.tmp-${process.pid}-${Date.now()}`;
+    const downloadUrl = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${assetName}`;
+
+    if (fs.existsSync(binaryPath) && canRunYtDlp(binaryPath)) {
+      log('video.ytdlp.ready', { source: 'cached', binaryPath, platform, arch });
+      return binaryPath;
+    }
+
+    log('video.ytdlp.download.start', { platform, arch, assetName, downloadUrl });
+    fs.mkdirSync(baseDir, { recursive: true });
+
+    let response;
+    try {
+      response = await fetchWithTimeout(downloadUrl, { method: 'GET' }, 45000);
+    } catch (err) {
+      throw new Error(`Failed to download yt-dlp: ${err.message}`);
+    }
+
+    if (!response.ok) {
+      throw new Error(`Failed to download yt-dlp: HTTP ${response.status}`);
+    }
+
+    let bytes;
+    try {
+      const arrayBuffer = await response.arrayBuffer();
+      bytes = Buffer.from(arrayBuffer);
+      fs.writeFileSync(tempPath, bytes);
+
+      if (platform !== 'win32') {
+        fs.chmodSync(tempPath, 0o755);
+      }
+
+      fs.renameSync(tempPath, binaryPath);
+    } finally {
+      try {
+        if (fs.existsSync(tempPath)) {
+          fs.unlinkSync(tempPath);
+        }
+      } catch {}
+    }
+
+    if (!canRunYtDlp(binaryPath)) {
+      try {
+        if (fs.existsSync(binaryPath)) {
+          fs.unlinkSync(binaryPath);
+        }
+      } catch (cleanupErr) {
+        log('video.ytdlp.cleanup.failed', { error: cleanupErr.message, binaryPath });
+      }
+      throw new Error(`yt-dlp downloaded but execution failed: ${binaryPath}`);
+    }
+
+    log('video.ytdlp.download.done', {
+      binaryPath,
+      size: bytes.length,
+      platform,
+      arch,
+      assetName,
+    });
+
+    return binaryPath;
+  })();
+
+  try {
+    return await ytdlpEnsurePromise;
+  } finally {
+    ytdlpEnsurePromise = null;
+  }
+}
+
 async function downloadVideoWithYtDlp(videoUrl, sendLog) {
   const { spawn } = require('child_process');
   const path = require('path');
@@ -1028,85 +1173,94 @@ async function downloadVideoWithYtDlp(videoUrl, sendLog) {
     // 先尝试指定分辨率范围，再降级
     const formatSelector = `bestvideo[height=${minResolution}]+bestaudio/bestvideo[height<=${minResolution}]+bestaudio/best[height<=${minResolution}]/best`;
 
-    const ytdlp = spawn('yt-dlp', [
-      '-f', formatSelector,
-      '--no-playlist',
-      '--max-filesize', '100M',
-      '-o', outputFile,
-      '--no-warnings',
-      '--merge-output-format', 'mp4',
-      videoUrl
-    ]);
+    let ytdlpBinary = 'yt-dlp';
+    ensureYtDlpAvailable(sendLog).then((resolvedBinary) => {
+      ytdlpBinary = resolvedBinary;
+      const ytdlp = spawn(ytdlpBinary, [
+        '-f', formatSelector,
+        '--no-playlist',
+        '--max-filesize', '100M',
+        '-o', outputFile,
+        '--no-warnings',
+        '--merge-output-format', 'mp4',
+        videoUrl
+      ]);
 
-    let stderr = '';
-    
-    ytdlp.stderr.on('data', (data) => {
-      stderr += data.toString();
-      // 解析下载进度
-      const progressMatch = stderr.match(/(\d+\.?\d*)%/);
-      if (progressMatch) {
-        sendLog('video.download.progress', { progress: progressMatch[1] + '%' });
-      }
-    });
+      let stderr = '';
+      
+      ytdlp.stderr.on('data', (data) => {
+        stderr += data.toString();
+        // 解析下载进度
+        const progressMatch = stderr.match(/(\d+\.?\d*)%/);
+        if (progressMatch) {
+          sendLog('video.download.progress', { progress: progressMatch[1] + '%' });
+        }
+      });
 
-    ytdlp.on('close', (code) => {
-      if (code !== 0) {
-        // 失败时清理临时文件
+      ytdlp.on('close', (code) => {
+        if (code !== 0) {
+          // 失败时清理临时文件
+          try {
+            if (fs.existsSync(outputFile)) {
+              fs.unlinkSync(outputFile);
+            }
+          } catch {}
+          reject(new Error(`yt-dlp exited with code ${code}: ${stderr}`));
+          return;
+        }
+
+        if (!fs.existsSync(outputFile)) {
+          reject(new Error('Video file not found after download'));
+          return;
+        }
+
+        try {
+          const stats = fs.statSync(outputFile);
+          const bytes = fs.readFileSync(outputFile);
+          const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+          
+          sendLog('video.download.finished', {
+            filepath: outputFile,
+            size: stats.size,
+            sizeMB: sizeMB + ' MB'
+          });
+
+          // 创建附件对象，格式与网页上传的一致
+          const base64 = bytes.toString('base64');
+          const dataUrl = `data:video/mp4;base64,${base64}`;
+          
+          const attachment = {
+            source: dataUrl,
+            filename: path.basename(outputFile),
+            mimeType: 'video/mp4',
+            explicitType: 'video',
+            _tempFilePath: outputFile, // 保留临时文件路径，后续删除
+          };
+
+          resolve(attachment);
+        } catch (err) {
+          reject(err);
+        }
+      });
+
+      ytdlp.on('error', (err) => {
+        // 错误时清理临时文件
         try {
           if (fs.existsSync(outputFile)) {
             fs.unlinkSync(outputFile);
           }
-        } catch {}
-        reject(new Error(`yt-dlp exited with code ${code}: ${stderr}`));
-        return;
-      }
-
-      if (!fs.existsSync(outputFile)) {
-        reject(new Error('Video file not found after download'));
-        return;
-      }
-
-      try {
-        const stats = fs.statSync(outputFile);
-        const bytes = fs.readFileSync(outputFile);
-        const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
-        
-        sendLog('video.download.finished', { 
-          filepath: outputFile, 
-          size: stats.size, 
-          sizeMB: sizeMB + ' MB'
-        });
-
-        // 创建附件对象，格式与网页上传的一致
-        const base64 = bytes.toString('base64');
-        const dataUrl = `data:video/mp4;base64,${base64}`;
-        
-        const attachment = {
-          source: dataUrl,
-          filename: path.basename(outputFile),
-          mimeType: 'video/mp4',
-          explicitType: 'video',
-          _tempFilePath: outputFile, // 保留临时文件路径，后续删除
-        };
-
-        resolve(attachment);
-      } catch (err) {
-        reject(err);
-      }
-    });
-
-    ytdlp.on('error', (err) => {
-      // 错误时清理临时文件
-      try {
-        if (fs.existsSync(outputFile)) {
-          fs.unlinkSync(outputFile);
+        } catch (cleanupErr) {
+          sendLog('video.download.cleanup.failed', { error: cleanupErr.message, outputFile });
         }
-      } catch {}
-      if (err.code === 'ENOENT') {
-        reject(new Error('yt-dlp not found. Please install yt-dlp first.'));
-      } else {
-        reject(err);
-      }
+        if (err.code === 'ENOENT') {
+          reject(new Error(`yt-dlp not found after ensure step. binary=${ytdlpBinary}`));
+        } else {
+          reject(err);
+        }
+      });
+    }).catch((err) => {
+      sendLog('video.ytdlp.ensure.failed', { error: err && err.message ? err.message : String(err) });
+      reject(err);
     });
   });
 }

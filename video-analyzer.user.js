@@ -4,8 +4,8 @@
 // @version      1.3.0
 // @description  在常见视频播放详情页增加分析面板，支持流式输出与日志查看
 // @author       hephaestus
-// @match        https://*/*
-// @match        http://*/*
+// @match        https://www.bilibili.com/video/*
+// @match        https://www.youtube.com/watch*
 // @grant        none
 // @run-at       document-start
 // ==/UserScript==
