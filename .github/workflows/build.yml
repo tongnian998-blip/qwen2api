@@ -2,33 +2,34 @@ name: 🐳 Build & Push Docker Image
 
 on:
   push:
-    branches: [main, master]      # 推送主分支时触发
-    tags: ['v*']                   # 打 tag 时也触发
+    branches: [main, master]
+    tags: ['v*']
   pull_request:
-    branches: [main]              # PR 时构建测试（不推送）
+    branches: [main]
+  workflow_dispatch:  # ✅ 添加手动触发按钮
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}  # 自动变成: ghcr.io/tongnian998-blip/qwen2api
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write              # 🔑 关键：允许推送镜像到 GitHub Packages
+      packages: write
     steps:
-      - name: 📦 Checkout code
+      - name: 📦 Checkout
         uses: actions/checkout@v4
 
-      - name: 🔐 Login to GitHub Container Registry
+      - name: 🔐 Login to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 🏷️ Extract metadata (tags, labels)
+      - name: 🏷️ Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -37,16 +38,17 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: 🛠️ Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: 🛠️ Build and push
+        uses: docker/build-push-action@v5  # 如报错可改为 @v4
         with:
-          context: .                    # 项目根目录
-          file: ./Dockerfile           # Dockerfile 路径（根目录可省略）
-          push: ${{ github.event_name != 'pull_request' }}  # PR 时不推送
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha         # 🚀 启用 GitHub Actions 缓存加速
-          cache-to: type=gha,mode=max
+          platforms: linux/amd64  # ✅ 关键：明确架构
+          # 🔄 缓存（可选，如报错先注释）
+          # cache-from: type=gha
+          # cache-to: type=gha,mode=max
