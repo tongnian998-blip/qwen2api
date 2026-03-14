@@ -1,4 +1,4 @@
-name: 🐳 Build & Push Docker Image
+name: 🐳 Build & Push Docker Image (ARM64 Only)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
-  workflow_dispatch:  # ✅ 添加手动触发按钮
+  workflow_dispatch:  # ✅ 手动触发
 
 env:
   REGISTRY: ghcr.io
@@ -40,15 +40,24 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: 🛠️ Build and push
-        uses: docker/build-push-action@v5  # 如报错可改为 @v4
+      - name: ⚙️ Set up QEMU (ARM 构建必需)
+        uses: docker/setup-qemu-action@v3
+
+      - name: 🧰 Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 🛠️ Build and push (ARM64 ONLY)
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64  # ✅ 关键：明确架构
-          # 🔄 缓存（可选，如报错先注释）
-          # cache-from: type=gha
-          # cache-to: type=gha,mode=max
+          
+          # ✅ 关键：只构建 arm64
+          platforms: linux/arm64
+          
+          # 🔄 缓存加速（可选）
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
