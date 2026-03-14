@@ -216,7 +216,7 @@ npm run dev
 # Server runs at http://localhost:8765
 ```
 
-## Disclaimer
+## Disclaimer   dd
 
 This project is for learning and testing purposes only. Do not use it in production or commercial environments. Users are solely responsible for any consequences arising from the use of this project, and the project author assumes no liability.
 
